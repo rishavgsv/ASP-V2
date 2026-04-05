@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+torch
+transformers
+librosa
+noisereduce
+pydub
+pydantic
+python-multipart
+scipy
+numpy
+soundfile
+matplotlib
+pyyaml
+openai-whisper
+SpeechRecognition
