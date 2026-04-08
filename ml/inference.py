@@ -35,35 +35,67 @@ class AAQAInference:
             transcription = "[Could not transcribe - Unclear or noise detected]"
 
         # Calculate Blind Evaluation Score (Non-Intrusive Paradigm)
+        import math
+        import numpy as np
         
-        # Smooth mapping function
-        def map_score(val, min_val, max_val, max_points):
-            # If min_val > max_val, it means lower variable values give higher points (e.g. flatness)
-            if min_val > max_val:
-                ratio = (min_val - val) / (min_val - max_val)
-            else:
-                ratio = (val - min_val) / (max_val - min_val)
-            return min(max_points, max(0.0, ratio * max_points))
+        # 1. Non-linear mapping implementations
+        
+        # SNR (sigmoid scaling)
+        # Center shifted to 12dB: clean speech (18-22dB) now saturates towards 40pts
+        # A perfectly clean recording at 22dB gets ~38/40 pts here
+        wsnr_score = 40.0 / (1.0 + math.exp(-0.5 * (windowed_snr - 12.0)))
+        
+        # Formant Energy (power scaling)
+        # Real speech rarely exceeds 0.45 formant ratio, not 0.6, due to sub-band fundamentals.
+        clamped_formant = max(0.0, min(1.0, formant_energy_ratio / 0.45))
+        formant_score = 35.0 * (clamped_formant ** 1.5)
+        
+        # Spectral Flatness (log scaling)
+        # Ceiling of 30dB: good audio with flatness~0.04 gets ~14dB on log scale => 14/30=0.47 => 11.7pts
+        # Ceiling of 30 gives much better resolution in the 0.03-0.2 flatness range for real microphones
+        flatness = np.clip(spectral_flatness, 1e-6, 1.0)
+        flatness_db = -10 * np.log10(flatness)
+        sf_score = 25.0 * np.clip(flatness_db / 30.0, 0.0, 1.0)
+        
+        base_score = wsnr_score + formant_score + sf_score
 
-        # 1. Windowed SNR Score: 0 to 40 max points.
-        # Below 5dB = 0 pts. Above 25dB = 40 pts.
-        wsnr_score = map_score(windowed_snr, 5.0, 25.0, 40.0)
-        
-        # 2. Spectral Flatness Score: 0 to 25 max points.
-        # Flatness 0.4 (hiss/noise) = 0 pts. Flatness 0.05 (pure speech) = 25 pts.
-        sf_score = map_score(spectral_flatness, 0.35, 0.05, 25.0)
-        
-        # 3. Formant Structure Score: 0 to 35 max points.
-        # Power within human vocal range 300Hz-3400Hz.
-        # Ratio 0.2 = 0 pts, Ratio 0.6+ = 35 pts.
-        formant_score = map_score(formant_energy_ratio, 0.2, 0.6, 35.0)
+        # 2. Multiplicative Penalties
 
-        # 4. Zero-Crossing Rate Penalty: up to 30 points deducted.
-        # ZCR 0.1 (normal) = 0 penalty. ZCR 0.4 (heavy static) = 30 penalty.
-        zcr_penalty = map_score(zcr, 0.1, 0.35, 30.0)
+        # ZCR Exponential Penalty
+        if zcr <= 0.12:
+            p_zcr = 1.0
+        else:
+            p_zcr = math.exp(-8.0 * (zcr - 0.12))
+            
+        p_zcr = max(0.0, min(1.0, p_zcr))
         
-        raw_quality_score = wsnr_score + sf_score + formant_score - zcr_penalty
-        final_score = min(100.0, max(0.0, raw_quality_score))
+        # Noise Trapdoor Multipliers
+        if windowed_snr < 10.0:
+            p_noise = 0.4
+        elif spectral_flatness > 0.2:
+            p_noise = 0.5
+        else:
+            p_noise = 1.0
+            
+        # Speech Presence Gate
+        p_speech = min(1.0, (formant_energy_ratio / 0.35) ** 0.7)
+        
+        # 3. Final Pipeline Calculation
+        final_score = base_score * (0.5 + 0.5 * p_speech) * p_zcr * p_noise
+        final_score = min(100.0, max(0.0, final_score))
+
+        # Debug Trace
+        print({
+            "SNR": windowed_snr,
+            "ZCR": zcr,
+            "Flatness": spectral_flatness,
+            "Formant": formant_energy_ratio,
+            "Base Score": base_score,
+            "p_zcr": p_zcr,
+            "p_noise": p_noise,
+            "p_speech": p_speech,
+            "Final Score": final_score
+        })
         
         # Generate detailed UI Feedback
         feedback = []
@@ -78,7 +110,7 @@ class AAQAInference:
         else:
             feedback.append("Excellent dynamic contrast (Clear speech bursts).")
             
-        if spectral_flatness > 0.25:
+        if spectral_flatness > 0.2:
             feedback.append("🛑 Heavy broadband hiss/drone overshadowing the voice.")
             
         if zcr > 0.15:
@@ -89,19 +121,27 @@ class AAQAInference:
         else:
             feedback.append("Strong organic human vocal tonality located.")
 
-        if final_score > 75:
+        # Quality Classification Layer
+        if final_score >= 80:
+            label = "Excellent"
+        elif final_score >= 60:
             label = "Good"
-        elif final_score > 40:
-            label = "Moderate"
-        else:
+        elif final_score >= 40:
+            label = "Average"
+        elif final_score >= 20:
             label = "Poor"
+        else:
+            label = "Bad"
+            
+        # Extract generic chunked confidence score logic developed from the Processor module
+        confidence = metrics.get("confidence", round((final_score / 100.0), 2))
             
         return {
             "score": round(final_score, 1),
             "label": label,
-            "snr": round(windowed_snr, 1), # Send windowed SNR as the primary SNR metric
+            "snr": round(windowed_snr, 1), 
             "transcription": transcription,
-            "confidence": round((final_score / 100.0), 2),
+            "confidence": confidence,
             "noise_level": noise_level,
             "clarity_score": round((final_score / 100.0), 2),
             "feedback": feedback,
@@ -113,10 +153,13 @@ class AAQAInference:
                     "zcr": round(zcr, 4)
                 },
                 "component_scores": {
+                    "base_score": round(base_score, 1),
                     "wsnr_score": round(wsnr_score, 1),
                     "sf_score": round(sf_score, 1),
                     "formant_score": round(formant_score, 1),
-                    "zcr_penalty": round(zcr_penalty, 1)
+                    "p_zcr": round(p_zcr, 2),
+                    "p_noise": round(p_noise, 2),
+                    "p_speech": round(p_speech, 2)
                 }
             }
         }

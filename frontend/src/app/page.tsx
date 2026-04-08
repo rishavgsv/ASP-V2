@@ -21,10 +21,13 @@ interface AnalysisResult {
         zcr: number
     }
     component_scores: {
+        base_score: number
         wsnr_score: number
         sf_score: number
         formant_score: number
-        zcr_penalty: number
+        p_zcr: number
+        p_noise: number
+        p_speech: number
     }
   }
 }
@@ -34,8 +37,13 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  
   const waveformRef = useRef<HTMLDivElement>(null)
   const wavesurfer = useRef<WaveSurfer | null>(null)
+  
+  const mediaRecorder = useRef<MediaRecorder | null>(null)
+  const audioChunks = useRef<Blob[]>([])
 
   useEffect(() => {
     if (file && waveformRef.current && !wavesurfer.current) {
@@ -77,6 +85,40 @@ export default function Dashboard() {
       const selectedFile = e.target.files[0]
       setFile(selectedFile)
       setResult(null)
+    }
+  }
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream)
+      mediaRecorder.current = recorder
+      audioChunks.current = []
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunks.current.push(e.data)
+      }
+
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunks.current, { type: 'audio/wav' })
+        const audioFile = new File([audioBlob], 'live_recording.wav', { type: 'audio/wav' })
+        setFile(audioFile)
+        setResult(null)
+      }
+
+      recorder.start()
+      setIsRecording(true)
+    } catch (err) {
+      console.error('Error accessing microphone', err)
+      alert('Microphone access denied or unavailable.')
+    }
+  }
+
+  const stopRecording = () => {
+    if (mediaRecorder.current && isRecording) {
+      mediaRecorder.current.stop()
+      mediaRecorder.current.stream.getTracks().forEach(track => track.stop())
+      setIsRecording(false)
     }
   }
 
@@ -130,7 +172,17 @@ export default function Dashboard() {
         {/* Left Side: Upload & Controls */}
         <div className="sidebar">
           <section className="panel">
-            <h3><Upload size={20} style={{marginRight: '10px'}}/> Upload Source</h3>
+            <h3><Upload size={20} style={{marginRight: '10px'}}/> Upload or Record</h3>
+            
+            <div style={{ display: 'flex', gap: '10px', marginBottom: '1.5rem', marginTop: '1rem' }}>
+              <button 
+                onClick={isRecording ? stopRecording : startRecording} 
+                style={{ flex: 1, padding: '0.8rem', background: isRecording ? '#dc3545' : 'rgba(0, 240, 255, 0.1)', color: isRecording ? '#fff' : 'var(--accent-blue)', border: isRecording ? 'none' : '1px solid var(--accent-blue)', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', transition: 'all 0.2s' }}
+              >
+                {isRecording ? <><span style={{ width: '10px', height: '10px', background: '#fff', borderRadius: '50%' }}></span> STOP RECORDING</> : <><Mic size={18}/> LIVE RECORD</>}
+              </button>
+            </div>
+
             <div className="upload-box" onClick={() => document.getElementById('file-input')?.click()}>
               <FileAudio size={56} color="var(--accent-blue)" style={{ marginBottom: '1.5rem', filter: 'drop-shadow(0 0 10px rgba(0,240,255,0.4))' }} />
               <p style={{fontSize: '1.2rem', color: 'var(--text-main)', marginBottom: '0.5rem'}}>{file ? file.name : 'Select or drop audio file'}</p>
@@ -240,59 +292,41 @@ export default function Dashboard() {
 
               {result.dsp_metrics && (
                 <section className="panel">
-                  <h3><BarChart2 size={20} style={{ marginRight: '10px' }} /> Equalizer & DSP Mapping</h3>
+                  <h3><Sliders size={20} style={{ marginRight: '10px' }} /> Non-Linear Scoring Matrix</h3>
                   <div style={{ marginTop: '2rem', display: 'flex', flexDirection: 'column', gap: '1.8rem' }}>
                     
-                    {/* SNR Bar */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                        <span style={{ fontWeight: '600', letterSpacing: '1px' }}>Windowed SNR</span>
-                        <span style={{ fontWeight: 'bold', color: 'var(--accent-blue)' }}>+{result.dsp_metrics.component_scores.wsnr_score.toFixed(1)} / 40</span>
+                    {/* Base Score Breakdown */}
+                    <div style={{ background: 'rgba(255,255,255,0.03)', padding: '1.5rem', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                      <h4 style={{ marginBottom: '1rem', color: 'var(--text-muted)' }}>1. Composite Base Score</h4>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'monospace', fontSize: '0.9rem' }}>
+                        <span>Sigmoid SNR Score:</span> <span style={{ color: 'var(--accent-blue)' }}>+{result.dsp_metrics.component_scores.wsnr_score.toFixed(1)}</span>
                       </div>
-                      <div className="eq-bar-container">
-                        <div className="eq-bar-fill" style={{ width: `${(result.dsp_metrics.component_scores.wsnr_score / 40) * 100}%`, background: 'var(--accent-blue)' }}></div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'monospace', fontSize: '0.9rem', marginTop: '0.5rem' }}>
+                        <span>Power Scaling Formant:</span> <span style={{ color: 'var(--success)' }}>+{result.dsp_metrics.component_scores.formant_score.toFixed(1)}</span>
                       </div>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>Dynamic burst contrast (Measured: {result.dsp_metrics.metrics.windowed_snr.toFixed(1)} dB)</p>
-                      {renderFormula(result.dsp_metrics.metrics.windowed_snr, 5, 25, 40, result.dsp_metrics.component_scores.wsnr_score)}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'monospace', fontSize: '0.9rem', marginTop: '0.5rem' }}>
+                        <span>Inv-Quad Flatness:</span> <span style={{ color: 'var(--accent-purple)' }}>+{result.dsp_metrics.component_scores.sf_score.toFixed(1)}</span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                        <span style={{ fontWeight: 'bold' }}>PRE-PENALTY BASE:</span> 
+                        <span style={{ fontWeight: 'bold', fontSize: '1.2rem' }}>{result.dsp_metrics.component_scores.base_score.toFixed(1)} <span style={{fontSize: '0.8rem', color: '#8b949e'}}>pts</span></span>
+                      </div>
                     </div>
 
-                    {/* Flatness Bar */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                        <span style={{ fontWeight: '600', letterSpacing: '1px' }}>Spectral Flatness</span>
-                        <span style={{ fontWeight: 'bold', color: 'var(--accent-purple)' }}>+{result.dsp_metrics.component_scores.sf_score.toFixed(1)} / 25</span>
-                      </div>
-                      <div className="eq-bar-container">
-                        <div className="eq-bar-fill" style={{ width: `${(result.dsp_metrics.component_scores.sf_score / 25) * 100}%`, background: 'var(--accent-purple)' }}></div>
-                      </div>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>Tonality depth vs hiss (Measured: {result.dsp_metrics.metrics.spectral_flatness.toFixed(3)})</p>
-                      {renderFormula(result.dsp_metrics.metrics.spectral_flatness, 0.35, 0.05, 25, result.dsp_metrics.component_scores.sf_score, true)}
-                    </div>
-
-                    {/* Formant Bar */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                        <span style={{ fontWeight: '600', letterSpacing: '1px' }}>Formant Energy Density</span>
-                        <span style={{ fontWeight: 'bold', color: 'var(--success)' }}>+{result.dsp_metrics.component_scores.formant_score.toFixed(1)} / 35</span>
-                      </div>
-                      <div className="eq-bar-container">
-                        <div className="eq-bar-fill" style={{ width: `${(result.dsp_metrics.component_scores.formant_score / 35) * 100}%`, background: 'var(--success)' }}></div>
-                      </div>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>Power within vocal tract range (Measured: {result.dsp_metrics.metrics.formant_energy_ratio.toFixed(2)})</p>
-                      {renderFormula(result.dsp_metrics.metrics.formant_energy_ratio, 0.2, 0.6, 35, result.dsp_metrics.component_scores.formant_score)}
-                    </div>
-
-                    {/* ZCR Bar */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                        <span style={{ fontWeight: '600', letterSpacing: '1px' }}>Zero-Crossing Penalty</span>
-                        <span style={{ fontWeight: 'bold', color: 'var(--danger)' }}>-{result.dsp_metrics.component_scores.zcr_penalty.toFixed(1)}</span>
-                      </div>
-                      <div className="eq-bar-container">
-                        <div className="eq-bar-fill" style={{ width: `${(result.dsp_metrics.component_scores.zcr_penalty / 30) * 100}%`, background: 'var(--danger)' }}></div>
-                      </div>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>Distortion and harsh static rate (Measured: {result.dsp_metrics.metrics.zcr.toFixed(3)})</p>
-                      {renderFormula(result.dsp_metrics.metrics.zcr, 0.1, 0.35, 30, result.dsp_metrics.component_scores.zcr_penalty)}
+                    {/* Multipliers */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
+                        <div style={{ background: 'rgba(0,0,0,0.4)', padding: '1rem', borderRadius: '8px', textAlign: 'center', border: '1px solid rgba(255,255,255,0.02)' }}>
+                            <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>ZCR Decay</span>
+                            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: result.dsp_metrics.component_scores.p_zcr < 1 ? 'var(--danger)' : 'var(--success)' }}>&times; {result.dsp_metrics.component_scores.p_zcr.toFixed(2)}</span>
+                        </div>
+                        <div style={{ background: 'rgba(0,0,0,0.4)', padding: '1rem', borderRadius: '8px', textAlign: 'center', border: '1px solid rgba(255,255,255,0.02)' }}>
+                            <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Noise Trapdoor</span>
+                            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: result.dsp_metrics.component_scores.p_noise < 1 ? 'var(--warning)' : 'var(--success)' }}>&times; {result.dsp_metrics.component_scores.p_noise.toFixed(2)}</span>
+                        </div>
+                        <div style={{ background: 'rgba(0,0,0,0.4)', padding: '1rem', borderRadius: '8px', textAlign: 'center', border: '1px solid rgba(255,255,255,0.02)' }}>
+                            <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>Speech Gate</span>
+                            <span style={{ fontSize: '1.5rem', fontWeight: 'bold', color: result.dsp_metrics.component_scores.p_speech < 0.5 ? 'var(--danger)' : 'var(--success)' }}>&times; {result.dsp_metrics.component_scores.p_speech.toFixed(2)}</span>
+                        </div>
                     </div>
 
                   </div>
