@@ -136,9 +136,9 @@ export default function Dashboard() {
     formData.append('file', file)
 
     try {
-      const response = await fetch('http://localhost:8000/analyze', {
-        method: 'POST',
-        body: formData,
+      const response = await fetch('https://asp-v2.onrender.com/analyze', {
+  method: 'POST',
+  body: formData,
       })
 
       if (!response.ok) throw new Error('Analysis failed')
